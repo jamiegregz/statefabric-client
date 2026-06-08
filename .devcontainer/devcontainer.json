@@ -1,0 +1,11 @@
+{
+  "name": "statefabric-client",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "customizations": {
+    "vscode": {
+      "extensions": ["openai.chatgpt", "dbaeumer.vscode-eslint", "esbenp.prettier-vscode"]
+    }
+  },
+  "postCreateCommand": "npm install",
+  "remoteUser": "node"
+}
