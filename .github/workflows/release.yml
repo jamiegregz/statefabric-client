@@ -38,3 +38,4 @@ jobs:
         run: npm run release
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
