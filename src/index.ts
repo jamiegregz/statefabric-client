@@ -1,4 +1,4 @@
-const DEFAULT_APP_URL = "https://api.stagefabric.dev";
+const DEFAULT_APP_URL = "https://api.statefabric.dev";
 
 export type SessionState = Record<string, unknown>;
 
