@@ -2,7 +2,7 @@
   "name": "@statefabric/client",
   "version": "0.1.0",
   "description": "TypeScript client for the StateFabric session and compacted-context APIs.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "repository": {
     "type": "git",
