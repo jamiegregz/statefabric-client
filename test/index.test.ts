@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   StateFabricClient,
-  type CompactedContext,
+  StateFabricRequestError,
+  type CompactedContextResponse,
+  type SessionQuota,
   type StoredSession,
 } from "../src/index";
 
@@ -64,6 +66,15 @@ const session: StoredSession<{ text: string }> = {
   state: { active: true },
   events: [{ text: "hello" }],
   lastUpdateTime: 1_700_000_000_000,
+};
+
+const quota: SessionQuota = {
+  overQuota: false,
+  ingestionBlocked: false,
+  replayEventLimit: null,
+  retentionDays: 30,
+  suggestedBackoffMs: null,
+  quotaResetsAt: "2026-01-03T00:00:00.000Z",
 };
 
 beforeEach(() => {
@@ -134,6 +145,25 @@ describe("StateFabricClient", () => {
     });
   });
 
+  it("supports legacy config aliases", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(session));
+    const client = new StateFabricClient({
+      appApiUrl: "https://alias.example.test/",
+      apiKey: agentApiKey,
+    });
+
+    await client.listSessions({
+      appName: "demo-app",
+      userId: "user-1",
+    });
+
+    const call = getFetchCall();
+    expect(call.url).toBe(
+      "https://alias.example.test/api/agent-sessions?appName=demo-app&userId=user-1",
+    );
+    expectAuthHeaders(call);
+  });
+
   it("returns an existing session when ensureSession receives a conflict", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse({ message: "already exists" }, { status: 409 }))
@@ -178,12 +208,15 @@ describe("StateFabricClient", () => {
         appName: "demo app",
         userId: "user@example.com",
         sessionId: "session/with space",
+        branchId: "experiment/a",
+        numRecentEvents: 25,
+        afterTimestamp: 123_456,
       }),
     ).resolves.toEqual(session);
 
     const call = getFetchCall();
     expect(call.url).toBe(
-      `${normalizedApiBaseUrl}/api/agent-sessions/session%2Fwith%20space?appName=demo+app&userId=user%40example.com`,
+      `${normalizedApiBaseUrl}/api/agent-sessions/session%2Fwith%20space?appName=demo+app&userId=user%40example.com&branchId=experiment%2Fa&numRecentEvents=25&afterTimestamp=123456`,
     );
     expect(call.init.method).toBe("GET");
     expectAuthHeaders(call);
@@ -245,8 +278,40 @@ describe("StateFabricClient", () => {
     expect(call.init.method).toBe("DELETE");
   });
 
+  it("creates a session branch", async () => {
+    const branchResponse = {
+      sessionId: "session-1",
+      branchId: "draft",
+      parentEventId: "event-1",
+      createdEventId: "event-2",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      branches: [],
+      quota,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(branchResponse, { status: 201 }));
+    const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
+
+    await expect(
+      client.createSessionBranch({
+        sessionId: "session/1",
+        fromEventId: "event-1",
+        branchId: "draft",
+      }),
+    ).resolves.toEqual(branchResponse);
+
+    const call = getFetchCall();
+    expect(call.url).toBe(
+      `${normalizedApiBaseUrl}/api/agent-sessions/session%2F1/branches`,
+    );
+    expect(call.init.method).toBe("POST");
+    expect(getJsonBody(call)).toEqual({
+      fromEventId: "event-1",
+      branchId: "draft",
+    });
+  });
+
   it("gets compacted context and supports the compatibility alias", async () => {
-    const context: CompactedContext = {
+    const context: CompactedContextResponse = {
       sessionId: "session-1",
       appName: "demo-app",
       userId: "user-1",
@@ -260,6 +325,17 @@ describe("StateFabricClient", () => {
             content: "The session is active.",
           },
         ],
+      },
+      branchId: "main",
+      compaction: {
+        cacheHit: true,
+        eventCount: 1,
+        lastEventId: "event-1",
+      },
+      quota: {
+        ...quota,
+        fullReplayAvailable: true,
+        degradedFeatures: [],
       },
     };
     vi.mocked(fetch)
@@ -279,8 +355,55 @@ describe("StateFabricClient", () => {
     );
   });
 
-  it("appends events", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(emptyResponse());
+  it("returns context pending status with quota metadata", async () => {
+    const pending = {
+      message: "Compacted context is pending for the current event boundary.",
+      sessionId: "session-1",
+      branchId: "draft",
+      quota: {
+        ...quota,
+        fullReplayAvailable: false,
+        degradedFeatures: ["full-replay"],
+      },
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(pending, { status: 202 }));
+    const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
+
+    await expect(
+      client.getContextStatus({
+        appName: "demo-app",
+        userId: "user-1",
+        sessionId: "session-1",
+        branchId: "draft",
+      }),
+    ).resolves.toEqual({ status: "pending", pending });
+    expect(getFetchCall().url).toBe(
+      `${normalizedApiBaseUrl}/api/agent-context/session-1?appName=demo-app&userId=user-1&branchId=draft`,
+    );
+  });
+
+  it("returns missing context status for 404 responses", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(emptyResponse({ status: 404 }));
+    const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
+
+    await expect(
+      client.getContextStatus({
+        appName: "demo-app",
+        userId: "user-1",
+        sessionId: "missing",
+      }),
+    ).resolves.toEqual({ status: "missing" });
+  });
+
+  it("appends events and returns the receipt", async () => {
+    const receipt = {
+      id: "event-2",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      branchId: "draft",
+      parentEventId: "event-1",
+      quota,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(receipt, { status: 201 }));
     const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
 
     await expect(
@@ -288,8 +411,10 @@ describe("StateFabricClient", () => {
         sessionId: "session-1",
         eventType: "message.created",
         payload: { text: "hello" },
+        branchId: "draft",
+        parentEventId: "event-1",
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(receipt);
 
     const call = getFetchCall();
     expect(call.url).toBe(`${normalizedApiBaseUrl}/api/agent-events`);
@@ -298,13 +423,34 @@ describe("StateFabricClient", () => {
       sessionId: "session-1",
       eventType: "message.created",
       payload: { text: "hello" },
+      branchId: "draft",
+      parentEventId: "event-1",
     });
   });
 
   it("throws a typed request error with response messages", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      jsonResponse({ message: "API key is invalid" }, { status: 401 }),
-    );
+    const errorBody = { message: "API key is invalid" };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(errorBody, { status: 401 }));
+    const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
+
+    const promise = client.createSession({
+      appName: "demo-app",
+      userId: "user-1",
+      sessionId: "session-1",
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(StateFabricRequestError);
+    await expect(promise).rejects.toMatchObject({
+      name: "StateFabricRequestError",
+      statusCode: 401,
+      responseBody: errorBody,
+      message: `POST ${normalizedApiBaseUrl}/api/agent-sessions failed with 401: API key is invalid`,
+    });
+  });
+
+  it("preserves quota details on ingestion errors", async () => {
+    const errorBody = { message: "Quota exceeded", quota };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(errorBody, { status: 402 }));
     const client = new StateFabricClient({ apiBaseUrl, agentApiKey });
 
     await expect(
@@ -315,8 +461,9 @@ describe("StateFabricClient", () => {
       }),
     ).rejects.toMatchObject({
       name: "StateFabricRequestError",
-      statusCode: 401,
-      message: `POST ${normalizedApiBaseUrl}/api/agent-sessions failed with 401: API key is invalid`,
+      statusCode: 402,
+      responseBody: errorBody,
+      message: `POST ${normalizedApiBaseUrl}/api/agent-sessions failed with 402: Quota exceeded`,
     });
   });
 

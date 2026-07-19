@@ -38,7 +38,7 @@ const session = await client.ensureSession({
   state: { step: "started" },
 });
 
-await client.appendEvent({
+const event = await client.appendEvent({
   sessionId: session.id,
   eventType: "message.created",
   payload: { text: "Hello" },
@@ -51,13 +51,99 @@ const context = await client.getCompactedContext({
 });
 ```
 
-By default, the client uses the hosted `https://api.stagefabric.dev`. You can overwride this when needed (e.g. mocking):
+By default, the client uses the hosted `https://api.statefabric.dev`. You can override this when needed, such as in tests:
 
 ```ts
 const client = new StateFabricClient({
   apiBaseUrl: "https://api.example.com",
   agentApiKey: process.env.STATEFABRIC_AGENT_API_KEY,
 });
+```
+
+## Sessions and Branches
+
+Create or fetch sessions by application/user/session identity:
+
+```ts
+const session = await client.createSession({
+  appName: "my-app",
+  userId: "user-123",
+  sessionId: "session-abc",
+  state: { step: "started" },
+});
+
+const existing = await client.getSession({
+  appName: "my-app",
+  userId: "user-123",
+  sessionId: "session-abc",
+  branchId: "main",
+  numRecentEvents: 50,
+});
+```
+
+`ensureSession` creates the session and falls back to `getSession` when the API reports that the session already exists:
+
+```ts
+const session = await client.ensureSession({
+  appName: "my-app",
+  userId: "user-123",
+  sessionId: "session-abc",
+});
+```
+
+Create a branch from an existing event when you want to replay or explore alternate state:
+
+```ts
+const branch = await client.createSessionBranch({
+  sessionId: "session-abc",
+  fromEventId: "event-123",
+  branchId: "draft-reply",
+});
+```
+
+If `branchId` is omitted, the API generates one. Session responses include `branchId`, `branches`, and `quota` metadata when returned by branch-aware endpoints.
+
+## Events
+
+Append an event to the current branch head, or anchor it to a specific parent event:
+
+```ts
+const receipt = await client.appendEvent({
+  sessionId: "session-abc",
+  eventType: "message.created",
+  payload: { text: "Hello" },
+  branchId: "draft-reply",
+  parentEventId: branch.createdEventId,
+});
+```
+
+The receipt includes the created event id, parent event id, branch id, creation time, and quota metadata.
+
+## Context
+
+Use `getContext` or the compatibility alias `getCompactedContext` when you only need ready compacted context:
+
+```ts
+const context = await client.getContext({
+  appName: "my-app",
+  userId: "user-123",
+  sessionId: "session-abc",
+  branchId: "draft-reply",
+});
+```
+
+These methods return `undefined` for missing sessions/branches and for compaction that is still pending. Use `getContextStatus` when you need to distinguish those states and inspect quota details while pending:
+
+```ts
+const status = await client.getContextStatus({
+  appName: "my-app",
+  userId: "user-123",
+  sessionId: "session-abc",
+});
+
+if (status.status === "pending") {
+  console.log(status.pending.quota.suggestedBackoffMs);
+}
 ```
 
 ## Development Prerequisites
